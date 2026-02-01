@@ -3,6 +3,7 @@ import { MapContainer, TileLayer, Marker, Popup, CircleMarker, Polyline, useMapE
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { FaWater, FaCopy, FaTrash, FaPaste } from 'react-icons/fa';
+import Plot from 'react-plotly.js';
 
 import { puneLocations, puneCenter, getRiverColor, preSampledRiver, riverDescriptions } from './locations';
 
@@ -334,6 +335,8 @@ export default function App() {
   const [selectedSeason, setSelectedSeason] = useState('summer');
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
   const [seasonalPredictions, setSeasonalPredictions] = useState({});
+  const [selectedParameters, setSelectedParameters] = useState(['pH', 'DO (mg/L)', 'BOD (mg/L)']);
+  const [allSeasonsData, setAllSeasonsData] = useState({});
 
   const handleMapClick = useCallback((pt) => {
     if (selectMode === 'start') setStartPoint(pt);
@@ -496,7 +499,7 @@ export default function App() {
             .filter(Boolean);
           
           if (locPredictions.length > 0) {
-            const avgPred = { location: loc.name, river: loc.river };
+            const avgPred = { location: loc.name, location_name: loc.name, river: loc.river };
             const numericParams = ['pH', 'DO (mg/L)', 'BOD (mg/L)', 'FC MPN/100ml', 'TC MPN/100ml'];
             
             numericParams.forEach(param => {
@@ -530,6 +533,60 @@ export default function App() {
     }
     fetchSeasonalPredictions();
   }, [route, selectedSeason, selectedYear]);
+
+  // Fetch all seasons data for comparison chart
+  useEffect(() => {
+    async function fetchAllSeasons() {
+      if (route !== 'seasonal') return;
+      try {
+        const year = selectedYear;
+        const seasonsData = {};
+        
+        const seasonMonths = {
+          summer: [3, 4, 5],
+          monsoon: [6, 7, 8, 9],
+          winter: [10, 11, 12, 1, 2]
+        };
+        
+        for (const [season, months] of Object.entries(seasonMonths)) {
+          const allMonthPredictions = await Promise.all(
+            months.map(month => 
+              fetch(`${API_BASE}/predict_all?month=${month}&year=${year}`)
+                .then(res => res.json())
+            )
+          );
+          
+          const locationAverages = {};
+          puneLocations.forEach(loc => {
+            const locPredictions = allMonthPredictions
+              .map(monthData => monthData.predictions?.find(p => p.location === loc.name))
+              .filter(Boolean);
+            
+            if (locPredictions.length > 0) {
+              const avgPred = { location: loc.name };
+              const numericParams = ['pH', 'DO (mg/L)', 'BOD (mg/L)', 'FC MPN/100ml', 'TC MPN/100ml'];
+              
+              numericParams.forEach(param => {
+                const values = locPredictions.map(p => p[param]).filter(v => v !== null && v !== undefined);
+                if (values.length > 0) {
+                  avgPred[param] = values.reduce((a, b) => a + b, 0) / values.length;
+                }
+              });
+              
+              locationAverages[loc.id] = avgPred;
+            }
+          });
+          
+          seasonsData[season] = locationAverages;
+        }
+        
+        setAllSeasonsData(seasonsData);
+      } catch (err) {
+        console.error('Error fetching all seasons data:', err);
+      }
+    }
+    fetchAllSeasons();
+  }, [route, selectedYear]);
 
   // Update selected location's prediction when predictions change
   useEffect(() => {
@@ -720,7 +777,7 @@ export default function App() {
 
         {/* right sidebar: show only on inner pages (not on Home) */}
         {route !== 'home' && (
-          <aside className="detail-panel" style={{width:360}}>
+          <aside className="detail-panel" style={{width:420, overflowY: 'auto', overflowX: 'hidden'}}>
           <div className="tab-bar">
             <button onClick={()=>setRoute('home')} className="small">Home</button>
             <button onClick={()=>setRoute('predict')} className="small primary">Predict</button>
@@ -805,6 +862,97 @@ export default function App() {
               <div style={{marginTop: '16px', padding: '12px', background: '#f1f5f9', borderRadius: '6px', fontSize: '13px', color: '#475569'}}>
                 Showing averaged predictions for {selectedSeason} {selectedYear}
               </div>
+              
+              {/* Parameter Comparison Chart - Seasonal comparison for selected station */}
+              {selected && (
+                <div style={{marginTop: '16px'}}>
+                  <h4 style={{marginBottom: '12px', color: '#1e293b', fontSize: '14px'}}>Seasonal Comparison</h4>
+                  <div style={{marginBottom: '12px'}}>
+                    <label style={{display: 'block', marginBottom: '8px', fontSize: '12px', color: '#475569', fontWeight: '500'}}>Select Parameters (max 4)</label>
+                    {['pH', 'DO (mg/L)', 'BOD (mg/L)', 'TC MPN/100ml', 'FC MPN/100ml'].map(param => (
+                      <label key={param} style={{display: 'flex', alignItems: 'center', marginBottom: '6px', cursor: 'pointer'}}>
+                        <input
+                          type="checkbox"
+                          checked={selectedParameters.includes(param)}
+                          onChange={(e) => {
+                            if (e.target.checked && selectedParameters.length < 4) {
+                              setSelectedParameters([...selectedParameters, param]);
+                            } else if (!e.target.checked) {
+                              setSelectedParameters(selectedParameters.filter(p => p !== param));
+                            }
+                          }}
+                          style={{marginRight: '8px'}}
+                        />
+                        <span style={{fontSize: '13px', color: '#374151'}}>{param.replace(/_/g, ' ')}</span>
+                      </label>
+                    ))}
+                  </div>
+                  
+                  {selectedParameters.length > 0 && Object.keys(allSeasonsData).length > 0 && (
+                    <div style={{overflowX: 'auto', overflowY: 'hidden', marginTop: '8px', width: '100%'}}>
+                      <Plot
+                        data={['summer', 'monsoon', 'winter'].map((season, idx) => {
+                          const seasonData = allSeasonsData[season];
+                          if (!seasonData || !seasonData[selected.id]) return null;
+                          
+                          return {
+                            x: selectedParameters.map(param => param.replace(/_/g, ' ')),
+                            y: selectedParameters.map(param => Number(seasonData[selected.id][param]) || 0),
+                            type: 'bar',
+                            name: season.charAt(0).toUpperCase() + season.slice(1),
+                            marker: {
+                              color: season === 'summer' ? '#f59e0b' : 
+                                    season === 'monsoon' ? '#3b82f6' : '#06b6d4'
+                            },
+                            text: selectedParameters.map(param => {
+                              const val = Number(seasonData[selected.id][param]) || 0;
+                              return val.toFixed(2);
+                            }),
+                            textposition: 'outside',
+                            textfont: { size: 9 }
+                          };
+                        }).filter(Boolean)}
+                        layout={{
+                          height: 400,
+                          width: 380,
+                          margin: { t: 40, b: 100, l: 50, r: 20 },
+                          xaxis: { 
+                            title: 'Parameters',
+                            tickangle: -45,
+                            tickfont: { size: 9 },
+                            automargin: true
+                          },
+                          yaxis: { 
+                            title: 'Value',
+                            automargin: true,
+                            tickfont: { size: 9 }
+                          },
+                          barmode: 'group',
+                          bargap: 0.15,
+                          bargroupgap: 0.1,
+                          showlegend: true,
+                          legend: {
+                            orientation: 'h',
+                            y: -0.45,
+                            x: 0.5,
+                            xanchor: 'center',
+                            font: { size: 9 }
+                          },
+                          paper_bgcolor: 'rgba(0,0,0,0)',
+                          plot_bgcolor: 'rgba(0,0,0,0)'
+                        }}
+                        config={{
+                          displayModeBar: true,
+                          displaylogo: false,
+                          modeBarButtonsToRemove: ['pan2d', 'lasso2d', 'select2d'],
+                          responsive: false
+                        }}
+                        style={{display: 'block'}}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           ) : (
             <div className="detail-calendar">
